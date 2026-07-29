@@ -1,0 +1,7 @@
+credentials.txt
+__pycache__/
+*.pyc
+.claude/settings.local.json
+
+# superseded scratch prototype, kept locally but not published
+login.oy.py
