@@ -32,9 +32,27 @@ login completes without a `jsessionid` turning up; the TypeScript client
 additionally makes a best-effort (unverified) guess at *why* — see
 `CasLoginError` in [`web/src/lib/suMealClient.ts`](web/src/lib/suMealClient.ts).
 
-**Credentials are never hardcoded or logged.** The Python client reads a
-local two-line `credentials.txt` (gitignored); the web app reads
-`SU_USERNAME` / `SU_PASSWORD` from `web/.env.local` (also gitignored).
+**Credentials are never hardcoded or logged.** Both clients read the same
+local two-line `credentials.txt` at the repo root (gitignored) — username on
+line 1, password on line 2. The web app falls back to `SU_USERNAME` /
+`SU_PASSWORD` in `web/.env.local` (also gitignored) if `credentials.txt`
+isn't present.
+
+There's a second, independent integration: the COB account-balance
+dashboard at `coblc2.sun.ac.za:9085` uses the same SU username/password but
+a completely separate CAS session — its own CAS host (`sso-prod.sun.ac.za`
+instead of `sso.sun.ac.za`), its own service URL, and a `SPACEPORT` cookie
+instead of `jsessionid`. See `CobClient` in
+[`web/src/lib/cobClient.ts`](web/src/lib/cobClient.ts).
+
+Separately from all of the above, the **web dashboard itself** sits behind
+its own login screen (`web/src/app/login/`), unrelated to SU's CAS — this
+just gates access to the dashboard app, checked by `web/src/proxy.ts`
+middleware against an HMAC session cookie (`web/src/lib/appAuth.ts`). It
+checks credentials from `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` in
+`web/.env.local` if set — but the login page also always offers a
+"Continue with default account" button that skips the check entirely, so
+this gate is a convenience screen, not a real access control.
 
 ## Known API endpoints
 
@@ -53,6 +71,12 @@ shapes and caveats.
 | `increase-quota/{lang}/{amountCents}` | GET | Request a quota top-up. Async — returns success immediately but the balance updates later, and a pending request blocks further quota **and** COB requests for ~10 minutes |
 | `increase-cob/{lang}/{amountCents}` | GET | Same as above but for COB (carry-over balance). Endpoint confirmed by reading the real app's own `js/services/dataService.js`, not guessed |
 | `cancel-meal-booking/{lang}/{bookingId}` | GET | Seen in the real app's source; not wired up in either client yet |
+
+On the separate `coblc2.sun.ac.za:9085` COB dashboard (own CAS session — see above):
+
+| Endpoint | Method | Notes |
+|---|---|---|
+| `php/plugin/launchpadaccounts/accounts2` | POST | Body `{}`. Returns a JSON array of `{name, balance (cents), hash, primary}` — confirmed against a real response, one entry per real account |
 
 ## Setup
 
@@ -85,9 +109,11 @@ see the script for the exact invocation.
 
 ## Security notes
 
-- `credentials.txt`, `web/.env.local`, and `web/data/` (your saved weekly
-  pattern) are all gitignored — never commit real credentials or personal
-  booking data.
+- `credentials.txt`, `web/.env.local`, and `data/` (your saved weekly
+  pattern, booking history, and saved menus) are all gitignored — never
+  commit real credentials or personal booking data. `data/` lives at the
+  repo root, not under `web/`, so writing to it doesn't sit inside the
+  Next.js dev server's watched directory (see `web/src/lib/bookingHistoryStore.ts`).
 - The web app currently supports a single hardcoded user (read from env
   vars), but every internal function is already keyed by `userId` — see
   [`web/src/lib/credentials.ts`](web/src/lib/credentials.ts) and
@@ -96,6 +122,12 @@ see the script for the exact invocation.
 - Write actions (booking a meal, requesting a quota/COB increase, applying a
   weekly pattern) all have an explicit confirm step in the UI, since they're
   real, irreversible actions against a real account.
+- The dashboard's own login screen (see above) is not a real access
+  control — its bypass button always grants a session — and
+  `AUTH_SECRET`/`DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` default to
+  insecure dev values if unset. Don't expose the dashboard to the open
+  internet as-is; it's meant to sit behind something you already trust
+  (localhost, a private network, or your own reverse-proxy auth).
 
 ## Open items
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { Facility, MealOption } from "@/lib/suMealClient";
 
@@ -40,100 +40,163 @@ export default function BookMealPanel({ today }: { today: string }) {
   const [optionError, setOptionError] = useState<string | null>(null);
   const [optionCode, setOptionCode] = useState("");
 
-  const [confirming, setConfirming] = useState(false);
   const [booking, setBooking] = useState(false);
   const [bookError, setBookError] = useState<string | null>(null);
   const [bookSuccess, setBookSuccess] = useState<string | null>(null);
 
+  // Changing an "upstream" field (date → slot → facility) kicks off exactly
+  // one sequential, awaited fetch chain per change, guarded by a shared
+  // generation counter: before any fetch result is applied, we check that no
+  // newer change has started since — a slow or reordered response from a
+  // superseded chain is discarded instead of clobbering more recent state.
+  // Each level tries to restore the previously selected value once its fresh
+  // list arrives, and only clears it (and everything downstream) if that
+  // value is no longer valid for the new upstream choice. Mirrors
+  // WeeklyPatternPanel's cascade, which this was copied from.
+  const cascadeGenRef = useRef(0);
+
+  async function runOptionCascade(
+    forDate: string,
+    slotCode: string,
+    facilityCode: string,
+    gen: number,
+    restoreDescription: string | null
+  ) {
+    if (!facilityCode) {
+      if (cascadeGenRef.current !== gen) return;
+      setOptions([]);
+      setOptionCode("");
+      return;
+    }
+    setOptionStep("loading");
+    setOptionError(null);
+    try {
+      const data = await fetchJson<MealOption[]>(
+        `/api/options?date=${forDate}&slot=${slotCode}&facility=${facilityCode}`
+      );
+      if (cascadeGenRef.current !== gen) return;
+      const filtered = data.filter((o) => o.code !== "0");
+      setOptions(filtered);
+      setOptionStep("idle");
+      // Option (menu item) codes are date-specific — the same dish gets a
+      // different code every day — so match the previous selection by
+      // description instead.
+      const restored = restoreDescription
+        ? filtered.find(
+            (o) => o.bookable && o.description.toLowerCase() === restoreDescription.toLowerCase()
+          )
+        : undefined;
+      setOptionCode(restored?.code ?? "");
+    } catch (err) {
+      if (cascadeGenRef.current !== gen) return;
+      setOptionError(err instanceof Error ? err.message : String(err));
+      setOptionStep("error");
+    }
+  }
+
+  async function runFacilityCascade(
+    forDate: string,
+    slotCode: string,
+    gen: number,
+    restoreFacility: string | null,
+    restoreOptionDescription: string | null
+  ) {
+    setFacilityStep("loading");
+    setFacilityError(null);
+    try {
+      const data = await fetchJson<Facility[]>(`/api/facilities?date=${forDate}&slot=${slotCode}`);
+      if (cascadeGenRef.current !== gen) return;
+      const filtered = data.filter((f) => f.code !== "0");
+      setFacilities(filtered);
+      setFacilityStep("idle");
+      const finalFacility =
+        restoreFacility && filtered.some((f) => f.code === restoreFacility) ? restoreFacility : "";
+      setFacility(finalFacility);
+      await runOptionCascade(forDate, slotCode, finalFacility, gen, restoreOptionDescription);
+    } catch (err) {
+      if (cascadeGenRef.current !== gen) return;
+      setFacilityError(err instanceof Error ? err.message : String(err));
+      setFacilityStep("error");
+      setOptions([]);
+      setOptionCode("");
+    }
+  }
+
+  async function runDateCascade(
+    forDate: string,
+    gen: number,
+    restoreSlot: string | null,
+    restoreFacility: string | null,
+    restoreOptionDescription: string | null
+  ) {
+    setSlotStep("loading");
+    setSlotError(null);
+    try {
+      const data = await fetchJson<Facility[]>(`/api/meal-slots?date=${forDate}`);
+      if (cascadeGenRef.current !== gen) return;
+      const filtered = data.filter((s) => s.code !== "0");
+      setSlots(filtered);
+      setSlotStep("idle");
+      const finalSlot = restoreSlot && filtered.some((s) => s.code === restoreSlot) ? restoreSlot : "";
+      setSlot(finalSlot);
+      if (!finalSlot) {
+        setFacilities([]);
+        setFacility("");
+        setOptions([]);
+        setOptionCode("");
+        return;
+      }
+      await runFacilityCascade(forDate, finalSlot, gen, restoreFacility, restoreOptionDescription);
+    } catch (err) {
+      if (cascadeGenRef.current !== gen) return;
+      setSlotError(err instanceof Error ? err.message : String(err));
+      setSlotStep("error");
+      setFacilities([]);
+      setFacility("");
+      setOptions([]);
+      setOptionCode("");
+    }
+  }
+
+  useEffect(() => {
+    void runDateCascade(today, ++cascadeGenRef.current, null, null, null);
+    // Fetches the initial date's options once on mount; every later change
+    // goes through the imperative handlers below instead of a reactive effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function handleDateChange(value: string) {
+    const gen = ++cascadeGenRef.current;
+    const restoreSlot = slot || null;
+    const restoreFacility = facility || null;
+    const restoreOptionDescription = options.find((o) => o.code === optionCode)?.description ?? null;
     setDate(value);
-    setSlot("");
-    setFacilities([]);
-    setFacility("");
-    setOptions([]);
-    setOptionCode("");
     setBookSuccess(null);
     setBookError(null);
+    void runDateCascade(value, gen, restoreSlot, restoreFacility, restoreOptionDescription);
   }
 
   function handleSlotChange(value: string) {
+    const gen = ++cascadeGenRef.current;
     setSlot(value);
-    setFacility("");
-    setOptions([]);
-    setOptionCode("");
+    if (!value) {
+      setFacilities([]);
+      setFacility("");
+      setOptions([]);
+      setOptionCode("");
+      return;
+    }
+    const restoreFacility = facility || null;
+    const restoreOptionDescription = options.find((o) => o.code === optionCode)?.description ?? null;
+    void runFacilityCascade(date, value, gen, restoreFacility, restoreOptionDescription);
   }
 
   function handleFacilityChange(value: string) {
+    const gen = ++cascadeGenRef.current;
     setFacility(value);
-    setOptionCode("");
+    const restoreOptionDescription = options.find((o) => o.code === optionCode)?.description ?? null;
+    void runOptionCascade(date, slot, value, gen, restoreOptionDescription);
   }
-
-  // Fetch slots whenever the date changes (resetting downstream selections
-  // happens in handleDateChange, not here, so this effect only synchronizes
-  // with the API rather than also resetting sibling state). The "loading"
-  // flag is set inside a .then() rather than directly in the effect body —
-  // react-hooks/set-state-in-effect flags synchronous setState calls in an
-  // effect, so the update is deferred a microtask via Promise.resolve().
-  useEffect(() => {
-    if (!date) return;
-
-    Promise.resolve()
-      .then(() => {
-        setSlotStep("loading");
-        setSlotError(null);
-        return fetchJson<Facility[]>(`/api/meal-slots?date=${date}`);
-      })
-      .then((data) => {
-        setSlots(data.filter((s) => s.code !== "0"));
-        setSlotStep("idle");
-      })
-      .catch((err) => {
-        setSlotError(err instanceof Error ? err.message : String(err));
-        setSlotStep("error");
-      });
-  }, [date]);
-
-  // Fetch facilities whenever the slot changes.
-  useEffect(() => {
-    if (!date || !slot) return;
-
-    Promise.resolve()
-      .then(() => {
-        setFacilityStep("loading");
-        setFacilityError(null);
-        return fetchJson<Facility[]>(`/api/facilities?date=${date}&slot=${slot}`);
-      })
-      .then((data) => {
-        setFacilities(data.filter((f) => f.code !== "0"));
-        setFacilityStep("idle");
-      })
-      .catch((err) => {
-        setFacilityError(err instanceof Error ? err.message : String(err));
-        setFacilityStep("error");
-      });
-  }, [date, slot]);
-
-  // Fetch options whenever the facility changes.
-  useEffect(() => {
-    if (!date || !slot || !facility) return;
-
-    Promise.resolve()
-      .then(() => {
-        setOptionStep("loading");
-        setOptionError(null);
-        return fetchJson<MealOption[]>(
-          `/api/options?date=${date}&slot=${slot}&facility=${facility}`
-        );
-      })
-      .then((data) => {
-        setOptions(data.filter((o) => o.code !== "0"));
-        setOptionStep("idle");
-      })
-      .catch((err) => {
-        setOptionError(err instanceof Error ? err.message : String(err));
-        setOptionStep("error");
-      });
-  }, [date, slot, facility]);
 
   const selectedOption = options.find((o) => o.code === optionCode) ?? null;
   const selectedSlotDesc = slots.find((s) => s.code === slot)?.description ?? slot;
@@ -161,7 +224,6 @@ export default function BookMealPanel({ today }: { today: string }) {
         throw new Error(body.error ?? `Booking failed: ${r.status}`);
       }
       setBookSuccess(body.message ?? "Booking submitted.");
-      setConfirming(false);
       setOptionCode("");
       router.refresh();
     } catch (err) {
@@ -194,6 +256,7 @@ export default function BookMealPanel({ today }: { today: string }) {
             onChange={(e) => handleSlotChange(e.target.value)}
             disabled={slotStep === "loading" || slots.length === 0}
             className={selectClass}
+            suppressHydrationWarning
           >
             <option value="">
               {slotStep === "loading" ? "Loading..." : "Select"}
@@ -214,6 +277,7 @@ export default function BookMealPanel({ today }: { today: string }) {
             onChange={(e) => handleFacilityChange(e.target.value)}
             disabled={!slot || facilityStep === "loading" || facilities.length === 0}
             className={selectClass}
+            suppressHydrationWarning
           >
             <option value="">
               {facilityStep === "loading" ? "Loading..." : "Select"}
@@ -236,6 +300,7 @@ export default function BookMealPanel({ today }: { today: string }) {
             onChange={(e) => setOptionCode(e.target.value)}
             disabled={!facility || optionStep === "loading" || options.length === 0}
             className={selectClass}
+            suppressHydrationWarning
           >
             <option value="">
               {optionStep === "loading" ? "Loading..." : "Select"}
@@ -261,38 +326,14 @@ export default function BookMealPanel({ today }: { today: string }) {
             {selectedOption.sessionEnd}) — {selectedOption.cost}
           </div>
 
-          {!confirming ? (
-            <button
-              type="button"
-              onClick={() => setConfirming(true)}
-              disabled={!selectedOption.bookable}
-              className="mt-3 rounded bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-            >
-              Book this meal
-            </button>
-          ) : (
-            <div className="mt-3 flex items-center gap-2">
-              <span className="text-amber-700 dark:text-amber-400">
-                Confirm booking? This submits a real request against your account.
-              </span>
-              <button
-                type="button"
-                onClick={submitBooking}
-                disabled={booking}
-                className="rounded bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-              >
-                {booking ? "Booking..." : "Yes, book it"}
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirming(false)}
-                disabled={booking}
-                className="rounded border border-black/15 px-3 py-1.5 text-sm dark:border-white/20"
-              >
-                Cancel
-              </button>
-            </div>
-          )}
+          <button
+            type="button"
+            onClick={submitBooking}
+            disabled={!selectedOption.bookable || booking}
+            className="mt-3 rounded bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+          >
+            {booking ? "Booking..." : "Book this meal"}
+          </button>
         </div>
       )}
 

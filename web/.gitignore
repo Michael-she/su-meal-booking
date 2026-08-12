@@ -37,8 +37,6 @@ yarn-error.log*
 # vercel
 .vercel
 
-# per-user runtime data (weekly booking patterns, etc.)
-/data
 
 # typescript
 *.tsbuildinfo

@@ -26,13 +26,9 @@ export default function BookingsCalendar({ bookings }: { bookings: Booking[] }) 
   }, [bookings]);
 
   const initial = useMemo(() => {
-    if (bookings.length === 0) {
-      const now = new Date();
-      return { year: now.getFullYear(), month: now.getMonth() };
-    }
-    const first = new Date(bookings[0].start);
-    return { year: first.getFullYear(), month: first.getMonth() };
-  }, [bookings]);
+    const now = new Date();
+    return { year: now.getFullYear(), month: now.getMonth() };
+  }, []);
 
   const [cursor, setCursor] = useState(initial);
 
@@ -107,15 +103,22 @@ export default function BookingsCalendar({ bookings }: { bookings: Booking[] }) 
             >
               <div className="text-xs text-zinc-500 dark:text-zinc-400">{day}</div>
               <div className="mt-1 flex flex-col gap-0.5">
-                {dayBookings.map((b, j) => (
-                  <div
-                    key={j}
-                    title={`${b.description} (${b.mealCost})`}
-                    className="truncate rounded bg-emerald-100 px-1 py-0.5 text-[11px] text-emerald-900 dark:bg-emerald-900 dark:text-emerald-100"
-                  >
-                    {b.start.slice(11, 16)} {b.description}
-                  </div>
-                ))}
+                {dayBookings.map((b, j) => {
+                  const isPast = key < todayKey;
+                  return (
+                    <div
+                      key={j}
+                      title={`${b.description} (${b.mealCost})`}
+                      className={`truncate rounded px-1 py-0.5 text-[11px] ${
+                        isPast
+                          ? "bg-zinc-200 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                          : "bg-emerald-100 text-emerald-900 dark:bg-emerald-900 dark:text-emerald-100"
+                      }`}
+                    >
+                      {b.start.slice(11, 16)} {b.description}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           );

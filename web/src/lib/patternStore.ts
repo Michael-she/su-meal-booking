@@ -11,7 +11,10 @@ export interface PatternEntry {
   optionDescription: string;
 }
 
-const DATA_DIR = path.join(process.cwd(), "data");
+// One level up: the web app's cwd is web/, and this must live outside it —
+// writing inside web/ puts it under the Next.js dev server's file watcher,
+// so every write here triggers a full-page reload (see bookingHistoryStore.ts).
+const DATA_DIR = path.join(process.cwd(), "..", "data");
 
 function patternFilePath(userId: string): string {
   return path.join(DATA_DIR, `pattern-${userId}.json`);

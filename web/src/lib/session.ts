@@ -1,4 +1,5 @@
 import { SUMealClient } from "./suMealClient";
+import { CobClient } from "./cobClient";
 import { getCredentialsForUser } from "./credentials";
 
 /**
@@ -27,5 +28,24 @@ export async function getClientForUser(userId: string): Promise<SUMealClient> {
   }
   const client = new SUMealClient(creds.username, creds.password);
   clientsByUser.set(userId, client);
+  return client;
+}
+
+// Separate cache from clientsByUser: the COB balance dashboard is an
+// entirely independent CAS session (own host, own cookies), not just
+// another endpoint on the same client.
+const cobClientsByUser = new Map<string, CobClient>();
+
+export async function getCobClientForUser(userId: string): Promise<CobClient> {
+  const cached = cobClientsByUser.get(userId);
+  if (cached) {
+    return cached;
+  }
+  const creds = await getCredentialsForUser(userId);
+  if (!creds) {
+    throw new Error(`No credentials configured for user "${userId}"`);
+  }
+  const client = new CobClient(creds.username, creds.password);
+  cobClientsByUser.set(userId, client);
   return client;
 }

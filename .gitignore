@@ -1,4 +1,10 @@
 credentials.txt
+
+# per-user runtime data (weekly booking patterns, booking history, saved
+# menus) — lives outside web/ so writing it doesn't sit inside the Next.js
+# dev server's watched directory (see web/src/lib/bookingHistoryStore.ts)
+/data
+
 __pycache__/
 *.pyc
 .claude/settings.local.json

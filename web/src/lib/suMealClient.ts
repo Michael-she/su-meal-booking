@@ -113,55 +113,76 @@ export class SUMealClient {
     });
   }
 
+  /**
+   * CAS re-displays its own login form after a correctly-submitted POST on a
+   * significant fraction of attempts, even with known-good credentials —
+   * observed repeatedly against the real account, not a one-off. Retrying
+   * the whole ticket-fetch-and-submit flow a few times clears it, so that
+   * quirk is treated as retryable rather than an immediate hard failure.
+   */
+  private static readonly MAX_LOGIN_ATTEMPTS = 5;
+  private static readonly LOGIN_RETRY_DELAY_MS = 500;
+
   async login(): Promise<void> {
-    // Start from a clean jar on every login attempt. A long-lived client
-    // instance accumulates cookies across its lifetime, and a stale/partial
-    // set left over from a prior session (e.g. an old jsessionid, or a CAS
-    // ticket-granting cookie tied to an attempt that got interrupted) can
-    // make a fresh CAS flow fail even though a brand-new session succeeds —
-    // observed directly: an isolated script with a fresh jar and the Python
-    // client (fresh requests.Session() per run) both succeeded when this
-    // client's reused jar was failing to yield a jsessionid on retry.
-    this.jar = new CookieJar();
-    this.fetchWithCookies = fetchCookieFactory(fetch, this.jar);
+    for (let attempt = 1; attempt <= SUMealClient.MAX_LOGIN_ATTEMPTS; attempt++) {
+      // Start from a clean jar on every login attempt. A long-lived client
+      // instance accumulates cookies across its lifetime, and a stale/partial
+      // set left over from a prior session (e.g. an old jsessionid, or a CAS
+      // ticket-granting cookie tied to an attempt that got interrupted) can
+      // make a fresh CAS flow fail even though a brand-new session succeeds —
+      // observed directly: an isolated script with a fresh jar and the Python
+      // client (fresh requests.Session() per run) both succeeded when this
+      // client's reused jar was failing to yield a jsessionid on retry.
+      this.jar = new CookieJar();
+      this.fetchWithCookies = fetchCookieFactory(fetch, this.jar);
 
-    const loginPage = await this.request(LOGIN_URL);
-    const html = await loginPage.text();
-    const $ = cheerio.load(html);
+      const loginPage = await this.request(LOGIN_URL);
+      const html = await loginPage.text();
+      const $ = cheerio.load(html);
 
-    const lt = $('input[name="lt"]').attr("value");
-    const execution = $('input[name="execution"]').attr("value");
-    if (!lt || !execution) {
-      throw new Error(
-        "Could not find CAS login ticket fields — page structure may have changed."
-      );
-    }
+      const lt = $('input[name="lt"]').attr("value");
+      const execution = $('input[name="execution"]').attr("value");
+      if (!lt || !execution) {
+        throw new Error(
+          "Could not find CAS login ticket fields — page structure may have changed."
+        );
+      }
 
-    const body = new URLSearchParams({
-      username: this.username,
-      password: this.password,
-      lt,
-      execution,
-      _eventId: "submit",
-    });
+      const body = new URLSearchParams({
+        username: this.username,
+        password: this.password,
+        lt,
+        execution,
+        _eventId: "submit",
+      });
 
-    const postRes = await this.request(LOGIN_URL, {
-      method: "POST",
-      body,
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    });
+      const postRes = await this.request(LOGIN_URL, {
+        method: "POST",
+        body,
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      });
 
-    const cookies = await this.jar.getCookies(API_BASE);
-    if (!cookies.some((c) => c.key === "jsessionid")) {
+      const cookies = await this.jar.getCookies(API_BASE);
+      if (cookies.some((c) => c.key === "jsessionid")) {
+        this.authenticated = true;
+        return;
+      }
+
       const postHtml = await postRes.text();
       const $post = cheerio.load(postHtml);
       const stillOnCasLoginForm =
         postRes.url.includes("sso.sun.ac.za") && $post('input[name="lt"]').length > 0;
 
       if (stillOnCasLoginForm) {
+        if (attempt < SUMealClient.MAX_LOGIN_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, SUMealClient.LOGIN_RETRY_DELAY_MS));
+          continue;
+        }
         throw new CasLoginError(
-          "CAS returned the login form again after posting credentials — most likely " +
-            "rejected as invalid. (Heuristic, unverified against a real bad-credential response.)",
+          `CAS returned the login form again after posting credentials, on all ` +
+            `${SUMealClient.MAX_LOGIN_ATTEMPTS} attempts — likely rejected as invalid, but this ` +
+            "server is also known to re-display the login form on a well-formed request even " +
+            "with correct credentials, so this isn't conclusive.",
           "invalid-credentials"
         );
       }
@@ -182,7 +203,6 @@ export class SUMealClient {
         "unknown"
       );
     }
-    this.authenticated = true;
   }
 
   /**

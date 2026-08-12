@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { Facility, MealOption } from "@/lib/suMealClient";
 import type { PatternEntry } from "@/lib/patternStore";
@@ -42,6 +42,17 @@ function nextMonday(today: string): string {
   return addDaysIso(today, diff);
 }
 
+// The week concept elsewhere in this component (nextMonday, "Apply pattern to
+// a week") starts on Monday, not Sunday — so entries sort Monday-first too,
+// rather than by the raw 0=Sunday..6=Saturday value `dayOfWeek` is stored as.
+const MEAL_SLOT_ORDER: Record<string, number> = { B: 0, L: 1, D: 2 };
+
+function compareByWhenTheyOccur(a: PatternEntry, b: PatternEntry): number {
+  const dayDiff = ((a.dayOfWeek + 6) % 7) - ((b.dayOfWeek + 6) % 7);
+  if (dayDiff !== 0) return dayDiff;
+  return (MEAL_SLOT_ORDER[a.slot] ?? 99) - (MEAL_SLOT_ORDER[b.slot] ?? 99);
+}
+
 interface ResolvedRow {
   entry: PatternEntry;
   date: string;
@@ -59,6 +70,9 @@ export default function WeeklyPatternPanel({
 }) {
   const router = useRouter();
   const [pattern, setPattern] = useState<PatternEntry[]>(initialPattern);
+  // Display/iteration order only — entries are still stored in the order
+  // they were added; this just reorders how they're shown and resolved.
+  const sortedPattern = [...pattern].sort(compareByWhenTheyOccur);
 
   // --- Builder state ---
   const [dayOfWeek, setDayOfWeek] = useState(1); // Monday
@@ -77,89 +91,163 @@ export default function WeeklyPatternPanel({
   const [optionError, setOptionError] = useState<string | null>(null);
   const [optionCode, setOptionCode] = useState("");
 
+  const representativeDate = nextDateForWeekday(dayOfWeek, today);
+
+  // Changing an "upstream" field (day → slot → facility) kicks off exactly
+  // one sequential, awaited fetch chain per change, guarded by a shared
+  // generation counter: before any fetch result is applied, we check that no
+  // newer change has started since — a slow or reordered response from a
+  // superseded chain is discarded instead of clobbering more recent state.
+  // (Three independent effects reacting to overlapping dependencies used to
+  // race here — each fired in the same tick using not-yet-validated upstream
+  // values — which is exactly what made this unreliable against the real
+  // API's latency.) Each level tries to restore the previously selected
+  // value once its fresh list arrives, and only clears it (and everything
+  // downstream) if that value is no longer valid for the new upstream choice.
+  const cascadeGenRef = useRef(0);
+
+  async function runOptionCascade(
+    date: string,
+    slotCode: string,
+    facilityCode: string,
+    gen: number,
+    restoreDescription: string | null
+  ) {
+    if (!facilityCode) {
+      if (cascadeGenRef.current !== gen) return;
+      setOptions([]);
+      setOptionCode("");
+      return;
+    }
+    setOptionStep("loading");
+    setOptionError(null);
+    try {
+      const data = await fetchJson<MealOption[]>(
+        `/api/options?date=${date}&slot=${slotCode}&facility=${facilityCode}`
+      );
+      if (cascadeGenRef.current !== gen) return;
+      const filtered = data.filter((o) => o.code !== "0");
+      setOptions(filtered);
+      setOptionStep("idle");
+      // Unlike slot/facility codes, option (menu item) codes are date-specific
+      // — the same dish gets a different code every day — so match the
+      // previous selection by description, the same way resolveWeek() below
+      // re-matches a saved pattern entry against a given week's actual menu.
+      const restored = restoreDescription
+        ? filtered.find(
+            (o) => o.bookable && o.description.toLowerCase() === restoreDescription.toLowerCase()
+          )
+        : undefined;
+      setOptionCode(restored?.code ?? "");
+    } catch (err) {
+      if (cascadeGenRef.current !== gen) return;
+      setOptionError(err instanceof Error ? err.message : String(err));
+      setOptionStep("error");
+    }
+  }
+
+  async function runFacilityCascade(
+    date: string,
+    slotCode: string,
+    gen: number,
+    restoreFacility: string | null,
+    restoreOptionDescription: string | null
+  ) {
+    setFacilityStep("loading");
+    setFacilityError(null);
+    try {
+      const data = await fetchJson<Facility[]>(`/api/facilities?date=${date}&slot=${slotCode}`);
+      if (cascadeGenRef.current !== gen) return;
+      const filtered = data.filter((f) => f.code !== "0");
+      setFacilities(filtered);
+      setFacilityStep("idle");
+      const finalFacility =
+        restoreFacility && filtered.some((f) => f.code === restoreFacility) ? restoreFacility : "";
+      setFacility(finalFacility);
+      await runOptionCascade(date, slotCode, finalFacility, gen, restoreOptionDescription);
+    } catch (err) {
+      if (cascadeGenRef.current !== gen) return;
+      setFacilityError(err instanceof Error ? err.message : String(err));
+      setFacilityStep("error");
+      setOptions([]);
+      setOptionCode("");
+    }
+  }
+
+  async function runDayCascade(
+    date: string,
+    gen: number,
+    restoreSlot: string | null,
+    restoreFacility: string | null,
+    restoreOptionDescription: string | null
+  ) {
+    setSlotStep("loading");
+    setSlotError(null);
+    try {
+      const data = await fetchJson<Facility[]>(`/api/meal-slots?date=${date}`);
+      if (cascadeGenRef.current !== gen) return;
+      const filtered = data.filter((s) => s.code !== "0");
+      setSlots(filtered);
+      setSlotStep("idle");
+      const finalSlot = restoreSlot && filtered.some((s) => s.code === restoreSlot) ? restoreSlot : "";
+      setSlot(finalSlot);
+      if (!finalSlot) {
+        setFacilities([]);
+        setFacility("");
+        setOptions([]);
+        setOptionCode("");
+        return;
+      }
+      await runFacilityCascade(date, finalSlot, gen, restoreFacility, restoreOptionDescription);
+    } catch (err) {
+      if (cascadeGenRef.current !== gen) return;
+      setSlotError(err instanceof Error ? err.message : String(err));
+      setSlotStep("error");
+      setFacilities([]);
+      setFacility("");
+      setOptions([]);
+      setOptionCode("");
+    }
+  }
+
+  useEffect(() => {
+    void runDayCascade(representativeDate, ++cascadeGenRef.current, null, null, null);
+    // Fetches the initial day's options once on mount; every later change
+    // goes through the imperative handlers below instead of a reactive effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function handleDayChange(value: number) {
+    const gen = ++cascadeGenRef.current;
+    const date = nextDateForWeekday(value, today);
+    const restoreSlot = slot || null;
+    const restoreFacility = facility || null;
+    const restoreOptionDescription = options.find((o) => o.code === optionCode)?.description ?? null;
     setDayOfWeek(value);
-    setSlot("");
-    setFacilities([]);
-    setFacility("");
-    setOptions([]);
-    setOptionCode("");
+    void runDayCascade(date, gen, restoreSlot, restoreFacility, restoreOptionDescription);
   }
 
   function handleSlotChange(value: string) {
+    const gen = ++cascadeGenRef.current;
     setSlot(value);
-    setFacility("");
-    setOptions([]);
-    setOptionCode("");
+    if (!value) {
+      setFacilities([]);
+      setFacility("");
+      setOptions([]);
+      setOptionCode("");
+      return;
+    }
+    const restoreFacility = facility || null;
+    const restoreOptionDescription = options.find((o) => o.code === optionCode)?.description ?? null;
+    void runFacilityCascade(representativeDate, value, gen, restoreFacility, restoreOptionDescription);
   }
 
   function handleFacilityChange(value: string) {
+    const gen = ++cascadeGenRef.current;
     setFacility(value);
-    setOptionCode("");
+    const restoreOptionDescription = options.find((o) => o.code === optionCode)?.description ?? null;
+    void runOptionCascade(representativeDate, slot, value, gen, restoreOptionDescription);
   }
-
-  const representativeDate = nextDateForWeekday(dayOfWeek, today);
-
-  useEffect(() => {
-    Promise.resolve()
-      .then(() => {
-        setSlotStep("loading");
-        setSlotError(null);
-        return fetchJson<Facility[]>(`/api/meal-slots?date=${representativeDate}`);
-      })
-      .then((data) => {
-        setSlots(data.filter((s) => s.code !== "0"));
-        setSlotStep("idle");
-      })
-      .catch((err) => {
-        setSlotError(err instanceof Error ? err.message : String(err));
-        setSlotStep("error");
-      });
-    // representativeDate is derived from dayOfWeek; re-running per dayOfWeek is what we want.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dayOfWeek]);
-
-  useEffect(() => {
-    if (!slot) return;
-    Promise.resolve()
-      .then(() => {
-        setFacilityStep("loading");
-        setFacilityError(null);
-        return fetchJson<Facility[]>(
-          `/api/facilities?date=${representativeDate}&slot=${slot}`
-        );
-      })
-      .then((data) => {
-        setFacilities(data.filter((f) => f.code !== "0"));
-        setFacilityStep("idle");
-      })
-      .catch((err) => {
-        setFacilityError(err instanceof Error ? err.message : String(err));
-        setFacilityStep("error");
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dayOfWeek, slot]);
-
-  useEffect(() => {
-    if (!slot || !facility) return;
-    Promise.resolve()
-      .then(() => {
-        setOptionStep("loading");
-        setOptionError(null);
-        return fetchJson<MealOption[]>(
-          `/api/options?date=${representativeDate}&slot=${slot}&facility=${facility}`
-        );
-      })
-      .then((data) => {
-        setOptions(data.filter((o) => o.code !== "0"));
-        setOptionStep("idle");
-      })
-      .catch((err) => {
-        setOptionError(err instanceof Error ? err.message : String(err));
-        setOptionStep("error");
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dayOfWeek, slot, facility]);
 
   async function persistPattern(next: PatternEntry[]) {
     setPattern(next);
@@ -194,6 +282,74 @@ export default function WeeklyPatternPanel({
     void persistPattern(pattern.filter((e) => e.id !== id));
   }
 
+  // --- Save / load pattern as a JSON file ---
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [pendingImport, setPendingImport] = useState<PatternEntry[] | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+
+  function isPatternEntry(x: unknown): x is Omit<PatternEntry, "id"> {
+    if (typeof x !== "object" || x === null) return false;
+    const e = x as Record<string, unknown>;
+    return (
+      typeof e.dayOfWeek === "number" &&
+      e.dayOfWeek >= 0 &&
+      e.dayOfWeek <= 6 &&
+      typeof e.slot === "string" &&
+      typeof e.slotDescription === "string" &&
+      typeof e.facilityCode === "string" &&
+      typeof e.facilityDescription === "string" &&
+      typeof e.optionDescription === "string"
+    );
+  }
+
+  function savePatternToFile() {
+    const blob = new Blob([JSON.stringify(pattern, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `meal-pattern-${today}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file next time
+    if (!file) return;
+    setImportError(null);
+    setPendingImport(null);
+    file
+      .text()
+      .then((text) => {
+        const parsed = JSON.parse(text);
+        if (!Array.isArray(parsed) || !parsed.every(isPatternEntry)) {
+          throw new Error(
+            "That file doesn't look like a saved pattern (expected an array of pattern entries)."
+          );
+        }
+        // Fresh ids on import so a hand-edited or older-export file can't
+        // collide with entries already in the saved pattern.
+        const withFreshIds: PatternEntry[] = parsed.map((entry) => ({
+          ...entry,
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        }));
+        setPendingImport(withFreshIds);
+      })
+      .catch((err) => {
+        setImportError(err instanceof Error ? err.message : "Could not read that file.");
+      });
+  }
+
+  function confirmImport() {
+    if (!pendingImport) return;
+    void persistPattern(pendingImport);
+    setPendingImport(null);
+  }
+
+  function cancelImport() {
+    setPendingImport(null);
+  }
+
   // --- Apply-to-week state ---
   const [weekStart, setWeekStart] = useState(nextMonday(today));
   const [resolving, setResolving] = useState(false);
@@ -213,7 +369,7 @@ export default function WeeklyPatternPanel({
     setRows(null);
     setApplyResults(null);
     const resolved: ResolvedRow[] = [];
-    for (const entry of pattern) {
+    for (const entry of sortedPattern) {
       const date = dateForEntry(entry.dayOfWeek);
       try {
         const opts = await fetchJson<MealOption[]>(
@@ -317,6 +473,7 @@ export default function WeeklyPatternPanel({
               onChange={(e) => handleSlotChange(e.target.value)}
               disabled={slotStep === "loading" || slots.length === 0}
               className={selectClass}
+              suppressHydrationWarning
             >
               <option value="">{slotStep === "loading" ? "Loading..." : "Select"}</option>
               {slots.map((s) => (
@@ -335,6 +492,7 @@ export default function WeeklyPatternPanel({
               onChange={(e) => handleFacilityChange(e.target.value)}
               disabled={!slot || facilityStep === "loading" || facilities.length === 0}
               className={selectClass}
+              suppressHydrationWarning
             >
               <option value="">{facilityStep === "loading" ? "Loading..." : "Select"}</option>
               {facilities.map((f) => (
@@ -355,6 +513,7 @@ export default function WeeklyPatternPanel({
               onChange={(e) => setOptionCode(e.target.value)}
               disabled={!facility || optionStep === "loading" || options.length === 0}
               className={selectClass}
+              suppressHydrationWarning
             >
               <option value="">{optionStep === "loading" ? "Loading..." : "Select"}</option>
               {options.map((o) => (
@@ -383,12 +542,66 @@ export default function WeeklyPatternPanel({
       </div>
 
       <div className="rounded-lg border border-black/10 bg-white p-4 dark:border-white/15 dark:bg-zinc-900">
-        <div className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Saved pattern</div>
+        <div className="flex items-center justify-between">
+          <div className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Saved pattern</div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={savePatternToFile}
+              disabled={pattern.length === 0}
+              className="rounded border border-black/15 px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-50 dark:border-white/20 dark:hover:bg-zinc-800"
+            >
+              Save to file
+            </button>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="rounded border border-black/15 px-2 py-1 text-xs hover:bg-zinc-50 dark:border-white/20 dark:hover:bg-zinc-800"
+            >
+              Load from file
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/json"
+              onChange={handleFileChange}
+              className="hidden"
+            />
+          </div>
+        </div>
+
+        {importError && (
+          <p className="mt-2 text-xs text-red-600 dark:text-red-400">{importError}</p>
+        )}
+
+        {pendingImport && (
+          <div className="mt-2 rounded border border-amber-300 bg-amber-50 p-2 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+            Replace the saved pattern ({pattern.length} {pattern.length === 1 ? "entry" : "entries"}) with{" "}
+            {pendingImport.length} {pendingImport.length === 1 ? "entry" : "entries"} from the file?
+            <div className="mt-2 flex gap-2">
+              <button
+                type="button"
+                onClick={confirmImport}
+                className="rounded bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+              >
+                Replace
+              </button>
+              <button
+                type="button"
+                onClick={cancelImport}
+                className="rounded border border-black/15 px-3 py-1.5 text-xs dark:border-white/20"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
         {pattern.length === 0 ? (
           <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">No pattern entries yet.</p>
         ) : (
           <ul className="mt-2 flex flex-col gap-1">
-            {pattern.map((entry) => (
+            {sortedPattern.map((entry) => (
               <li
                 key={entry.id}
                 className="flex items-center justify-between rounded border border-black/10 px-3 py-1.5 text-sm dark:border-white/10"
