@@ -102,10 +102,28 @@ app's architecture and feature list.
 
 ### Desktop shortcut (Windows)
 
-[`start-app.ps1`](start-app.ps1) starts the dev server and opens the
-dashboard in your browser once it's ready. A Desktop shortcut can point
-`powershell.exe -NoExit -ExecutionPolicy Bypass -File start-app.ps1` at it —
-see the script for the exact invocation.
+Two launchers, both of which start the app and open it in your browser once
+it's ready:
+
+| Script | Mode | Port | Use for |
+| --- | --- | --- | --- |
+| [`start-dashboard.ps1`](start-dashboard.ps1) | production (`next start`) | 3000 | everyday use |
+| [`start-app.ps1`](start-app.ps1) | dev server (`next dev`) | 3000 | making changes |
+
+The **SU Meal Booking** Desktop shortcut points at `start-dashboard.ps1`
+(`powershell.exe -NoProfile -ExecutionPolicy Bypass -File start-dashboard.ps1`).
+It builds only when there is no build yet or when a build input under `web/src`,
+`web/public`, `package.json`, `next.config.ts`, `tsconfig.json` or
+`postcss.config.mjs` is newer than the last build — otherwise it starts in
+under a second. If the dashboard is already running it just opens the browser
+instead of failing on the busy port. The server runs in the launcher's own
+window; closing it (or Ctrl+C) stops the server.
+
+The production launcher builds into `web/.next-prod`, not `web/.next`, via
+`NEXT_DIST_DIR` (see [`web/next.config.ts`](web/next.config.ts)). `next build`
+wipes its output directory wholesale, so without the split, launching the
+production app while `npm run dev` was running destroyed the dev server's
+compiled output underneath it.
 
 ## Security notes
 

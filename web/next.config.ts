@@ -2,6 +2,13 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   /* config options here */
+  // The dev server and a production build would otherwise both own `.next`,
+  // and `next build` wipes that directory wholesale — so running the desktop
+  // launcher (start-dashboard.ps1) while `npm run dev` was up destroyed the
+  // dev server's compiled output from under it. The launcher sets
+  // NEXT_DIST_DIR=.next-prod so the two can coexist; plain `npm run dev` /
+  // `npm run build` still use `.next` as before.
+  distDir: process.env.NEXT_DIST_DIR ?? ".next",
   // Next 16 runs `next build` on Turbopack by default, and hard-errors when a
   // `webpack` config is present with no `turbopack` config — which broke
   // `npm run build` outright. The webpack block below is dev-only (it guards

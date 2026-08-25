@@ -15,6 +15,8 @@
 
 # next.js
 /.next/
+# production build dir used by the desktop launcher (start-dashboard.ps1)
+/.next-prod/
 /out/
 
 # production
