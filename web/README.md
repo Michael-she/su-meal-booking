@@ -108,6 +108,16 @@ the "Continue with default account" button on that page gets you in.
 
 ## Known gaps
 
+- **Pages that need live data must opt out of prerendering explicitly.** Auth
+  is enforced in `proxy.ts`, and `getCurrentUserId()` returns a constant, so
+  `/` and `/menu-upload` touch no request-time API (`cookies()`, `headers()`)
+  and Next happily treats them as static. In dev that's invisible — every
+  render is dynamic — but `next build` prerendered `/`, which meant the build
+  itself ran a real CAS login and baked one moment's quota, balance and
+  bookings into a static `index.html` that never updated. Both pages now call
+  `await connection()` (`next/server`) as their first statement. Any new page
+  that reads SU data or the `data/` store needs the same, and the build's route
+  table is the check: it must print `ƒ`, not `○`, next to that route.
 - `next build` runs on Turbopack by default in v16 and hard-errors if a
   `webpack` config is present without a `turbopack` one. The webpack block in
   `next.config.ts` is dev-only, so `turbopack: {}` is set to say Turbopack

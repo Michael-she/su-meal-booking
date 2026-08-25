@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { connection } from "next/server";
 import { getClientForUser, getCobClientForUser, getCurrentUserId } from "@/lib/session";
 import { CasLoginError, type Booking, type QuotaSummary } from "@/lib/suMealClient";
 import type { CobAccount } from "@/lib/cobClient";
@@ -86,6 +87,12 @@ function QuotaCard({ label, value }: { label: string; value: string }) {
 }
 
 export default async function Home() {
+  // Nothing below reads cookies() or headers() — auth is enforced in proxy.ts
+  // — so without this Next has no reason not to prerender this page at build
+  // time. It did exactly that: `next build` ran a real CAS login and baked
+  // one moment's quota, balance and bookings into a static index.html that
+  // then never changed. connection() marks the render as request-time.
+  await connection();
   const today = new Date().toISOString().slice(0, 10);
   const data = await loadDashboardData(today);
   const pattern = await getPatternForUser(getCurrentUserId());

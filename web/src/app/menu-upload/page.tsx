@@ -1,8 +1,13 @@
 import Link from "next/link";
+import { connection } from "next/server";
 import { listMenus } from "@/lib/menuStore";
 import MenuUploadPanel from "../MenuUploadPanel";
 
 export default async function MenuUploadPage() {
+  // Same reason as the dashboard: the saved-menu list is read from disk at
+  // request time, and would otherwise be frozen at whatever it was when
+  // `next build` ran. See app/page.tsx.
+  await connection();
   const menus = await listMenus();
 
   return (
