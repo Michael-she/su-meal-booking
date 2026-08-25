@@ -2,6 +2,13 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   /* config options here */
+  // Next 16 runs `next build` on Turbopack by default, and hard-errors when a
+  // `webpack` config is present with no `turbopack` config — which broke
+  // `npm run build` outright. The webpack block below is dev-only (it guards
+  // on `dev`), so there is nothing to migrate: an empty turbopack config just
+  // states that Turbopack needs no customisation, letting production builds
+  // use it while `next dev --webpack` keeps the watchOptions fix.
+  turbopack: {},
   // `logging: false` (and the narrower `browserToTerminal: false`) does NOT
   // reliably stop Next from writing to .next/dev/logs/next-development.log —
   // confirmed by watching that file keep growing with both settings in

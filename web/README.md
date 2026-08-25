@@ -108,6 +108,11 @@ the "Continue with default account" button on that page gets you in.
 
 ## Known gaps
 
+- `next build` runs on Turbopack by default in v16 and hard-errors if a
+  `webpack` config is present without a `turbopack` one. The webpack block in
+  `next.config.ts` is dev-only, so `turbopack: {}` is set to say Turbopack
+  needs no customisation — production builds use it, `next dev --webpack`
+  keeps the watchOptions fix.
 - CAS failure classification (`CasLoginError` in `suMealClient.ts`) is a
   best-effort heuristic based on where the login POST redirects to; no real
   bad-credential or MFA response has been captured to verify it against.
